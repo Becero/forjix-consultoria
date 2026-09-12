@@ -45,8 +45,9 @@ a {
   left: 0;
   right: 0;
   z-index: 50;
-  background: rgba(9, 13, 22, 0.82);
-  border-bottom: 1px solid rgba(255,255,255,.08);
+  background: rgba(255, 255, 255, .92);
+  border-bottom: 1px solid rgba(15, 21, 33, .08);
+  box-shadow: 0 8px 30px rgba(15, 21, 33, .04);
   backdrop-filter: blur(18px);
 }
 
@@ -60,36 +61,27 @@ a {
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-family: "Space Grotesk", sans-serif;
-  font-weight: 700;
-  letter-spacing: .08em;
 }
 
-.brand-mark {
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  border-radius: 9px;
-  color: var(--white);
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  box-shadow: 0 8px 30px rgba(255, 107, 53, .28);
-}
-
-.brand-text {
-  color: var(--white);
+.brand-logo {
+  display: block;
+  width: 154px;
+  height: auto;
 }
 
 .nav-links {
   display: flex;
   gap: 28px;
   align-items: center;
-  color: #d8dce5;
+  color: #344054;
   font-size: 14px;
 }
 
 .nav-links a:hover {
+  color: var(--bg-soft);
+}
+
+.nav-links .btn:hover {
   color: var(--white);
 }
 
@@ -704,6 +696,25 @@ footer {
   color: #7e889b;
 }
 
+.footer-brand {
+  color: var(--white);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: .12em;
+}
+
+.footer-brand::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 9px;
+  border-radius: 3px;
+  background: var(--accent);
+  transform: rotate(-8deg);
+}
+
 .footer-row {
   min-height: 110px;
   display: flex;
@@ -728,7 +739,7 @@ footer {
   display: block;
   width: 25px;
   height: 2px;
-  background: var(--white);
+  background: var(--bg-soft);
   margin: 5px 0;
 }
 
@@ -750,6 +761,7 @@ footer {
     background: #111827;
     border: 1px solid rgba(255,255,255,.08);
     border-radius: 16px;
+    color: #d8dce5;
   }
 
   .nav-links.open {
@@ -758,6 +770,10 @@ footer {
 
   .nav-links a {
     padding: 10px 4px;
+  }
+
+  .nav-links a:hover {
+    color: var(--white);
   }
 
   .hero-grid,
@@ -789,6 +805,10 @@ footer {
 @media (max-width: 640px) {
   .container {
     width: min(calc(100% - 28px), var(--max));
+  }
+
+  .brand-logo {
+    width: 138px;
   }
 
   .hero {
