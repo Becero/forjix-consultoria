@@ -13,7 +13,7 @@ caixa e administração de acessos.
 - baixa automática do estoque durante a venda;
 - cancelamento de venda com devolução dos itens ao estoque;
 - relatórios por período, ticket médio e produtos mais vendidos;
-- usuários, grupos e permissões configuráveis;
+- usuários, grupos e permissões granulares para menus, dados e ações;
 - trilha de auditoria das operações relevantes.
 
 ## Executar
@@ -47,9 +47,15 @@ para um futuro cliente mobile. Isso permite empacotar ou reconstruir a interface
 com Capacitor, React Native, Flutter ou .NET MAUI sem duplicar regras de estoque,
 vendas e permissões.
 
-As permissões são atribuídas aos grupos e verificadas novamente pela API. Ocultar
-um menu no frontend é apenas uma melhoria de interface; não é a barreira de
-segurança.
+As permissões são atribuídas aos grupos em **Grupos de acesso** e separadas em
+três níveis: exibição do menu, visualização de informações sensíveis e execução
+de ações. É possível, por exemplo, liberar Produtos sem mostrar custos, permitir
+o Caixa sem desconto ou liberar Estoque apenas para entradas.
+
+Cada restrição é aplicada em duas camadas: a interface remove menus, campos e
+botões não autorizados; a API valida novamente a permissão e filtra dados
+sensíveis mesmo quando alguém tenta acessar um endereço diretamente. Alterações
+de grupos existentes são migradas automaticamente para o modelo granular.
 
 ## Preparação para produção
 
@@ -86,4 +92,5 @@ npm test
 ```
 
 O teste cobre autenticação, cadastro de produto, movimentação, venda, cancelamento,
-devolução ao estoque, auditoria e bloqueio por permissão.
+devolução ao estoque, auditoria, filtragem de dados sensíveis e bloqueios de ações
+por permissão.

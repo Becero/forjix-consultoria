@@ -70,7 +70,10 @@ test('fluxo completo: autenticação, estoque, venda, cancelamento e permissões
   const group = await request('/groups', {
     token: adminToken,
     method: 'POST',
-    body: JSON.stringify({ name: 'Consulta teste', description: 'Somente catálogo', permissions: ['products.view'] })
+    body: JSON.stringify({
+      name: 'Consulta teste', description: 'Catálogo, caixa sem desconto e auditoria sem detalhes',
+      permissions: ['products.view', 'products.edit', 'sales.create', 'audit.view']
+    })
   });
   assert.equal(group.response.status, 201);
   const user = await request('/users', {
@@ -83,8 +86,61 @@ test('fluxo completo: autenticação, estoque, venda, cancelamento e permissões
     method: 'POST', body: JSON.stringify({ email: 'leitor@teste.local', password: 'Teste@123' })
   });
   const limitedToken = limitedLogin.body.token;
-  assert.equal((await request('/products', { token: limitedToken })).response.status, 200);
+  const limitedProducts = await request('/products', { token: limitedToken });
+  assert.equal(limitedProducts.response.status, 200);
+  assert.equal('cost' in limitedProducts.body[0], false);
+  assert.equal('stock' in limitedProducts.body[0], true, 'O caixa precisa do saldo para vender');
+  assert.equal('min_stock' in limitedProducts.body[0], false);
   assert.equal((await request('/users', { token: limitedToken })).response.status, 403);
+  const protectedEdit = await request(`/products/${createdProduct.body.id}`, {
+    token: limitedToken,
+    method: 'PUT',
+    body: JSON.stringify({
+      sku: createdProduct.body.sku, barcode: createdProduct.body.barcode, name: createdProduct.body.name,
+      description: createdProduct.body.description, categoryId: createdProduct.body.category_id,
+      cost: 999, price: createdProduct.body.price, minStock: 999
+    })
+  });
+  assert.equal(protectedEdit.response.status, 200);
+  const protectedFields = await request('/products?search=TESTE-001', { token: adminToken });
+  assert.equal(protectedFields.body[0].cost, 5.5);
+  assert.equal(protectedFields.body[0].min_stock, 2);
+  assert.equal((await request(`/products/${createdProduct.body.id}`, {
+    token: limitedToken,
+    method: 'PUT',
+    body: JSON.stringify({ ...protectedEdit.body, categoryId: protectedEdit.body.category_id, minStock: 2, active: false })
+  })).response.status, 403);
+  assert.equal((await request('/stock/movements', {
+    token: limitedToken,
+    method: 'POST',
+    body: JSON.stringify({ productId: createdProduct.body.id, type: 'ENTRY', quantity: 1 })
+  })).response.status, 403);
+  assert.equal((await request('/sales', {
+    token: limitedToken,
+    method: 'POST',
+    body: JSON.stringify({ items: [{ productId: createdProduct.body.id, quantity: 1 }], discount: 1, paymentMethod: 'PIX' })
+  })).response.status, 403);
+  const limitedAudit = await request('/audit', { token: limitedToken });
+  assert.equal(limitedAudit.response.status, 200);
+  assert.equal('details' in limitedAudit.body[0], false);
+
+  const permissions = await request('/permissions', { token: adminToken });
+  assert.ok(permissions.body.some(item => item.code === 'products.view_cost'));
+  assert.ok(permissions.body.some(item => item.code === 'groups.edit'));
+
+  const salesOperator = await request('/auth/login', {
+    method: 'POST', body: JSON.stringify({ email: 'vendas@forjix.local', password: 'Forjix@123' })
+  });
+  const salesDashboard = await request('/dashboard', { token: salesOperator.body.token });
+  assert.equal('salesToday' in salesDashboard.body.stats, true);
+  assert.equal('inventoryCost' in salesDashboard.body.stats, false);
+
+  const stockOperator = await request('/auth/login', {
+    method: 'POST', body: JSON.stringify({ email: 'estoque@forjix.local', password: 'Forjix@123' })
+  });
+  const stockReport = await request('/reports/summary', { token: stockOperator.body.token });
+  assert.equal(stockReport.body.sales, null);
+  assert.ok(stockReport.body.inventory.lowStock);
 
   const audit = await request('/audit', { token: adminToken });
   assert.ok(audit.body.some(item => item.entity === 'SALE' && item.action === 'CANCEL'));

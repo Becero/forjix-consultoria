@@ -92,23 +92,36 @@ app.post('/api/auth/logout', authenticate, (req, res) => {
 
 app.get('/api/auth/me', authenticate, (req, res) => res.json({ user: userPayload(req.user) }));
 
-app.get('/api/dashboard', authenticate, permit('dashboard.view'), (_req, res) => {
-  const stats = db.prepare(`SELECT
-    (SELECT COUNT(*) FROM products WHERE active = 1) AS productCount,
-    (SELECT COUNT(*) FROM products WHERE active = 1 AND stock <= min_stock) AS lowStockCount,
-    (SELECT COALESCE(SUM(stock * cost), 0) FROM products WHERE active = 1) AS inventoryCost,
-    (SELECT COALESCE(SUM(total), 0) FROM sales WHERE status = 'COMPLETED' AND date(created_at, 'localtime') = date('now', 'localtime')) AS salesToday,
-    (SELECT COUNT(*) FROM sales WHERE status = 'COMPLETED' AND date(created_at, 'localtime') = date('now', 'localtime')) AS salesCountToday
-  `).get();
-  const lowStock = db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
-    WHERE active = 1 AND stock <= min_stock ORDER BY stock - min_stock LIMIT 6`).all();
-  const recentSales = db.prepare(`SELECT s.id, s.number, s.total, s.payment_method, s.status, s.created_at, u.name AS user_name
-    FROM sales s JOIN users u ON u.id = s.user_id ORDER BY s.id DESC LIMIT 6`).all();
-  const salesByDay = db.prepare(`WITH RECURSIVE days(day) AS (
-    SELECT date('now', '-6 days') UNION ALL SELECT date(day, '+1 day') FROM days WHERE day < date('now')
-  ) SELECT days.day, COALESCE(SUM(s.total), 0) AS total FROM days
-    LEFT JOIN sales s ON date(s.created_at, 'localtime') = days.day AND s.status = 'COMPLETED'
-    GROUP BY days.day ORDER BY days.day`).all();
+app.get('/api/dashboard', authenticate, permit('dashboard.view'), (req, res) => {
+  const canSeeSales = req.user.permissions.includes('dashboard.view_sales');
+  const canSeeInventory = req.user.permissions.includes('dashboard.view_inventory');
+  const stats = {};
+  let lowStock = null;
+  let recentSales = null;
+  let salesByDay = null;
+
+  if (req.user.permissions.includes('products.view')) {
+    stats.productCount = db.prepare('SELECT COUNT(*) AS total FROM products WHERE active = 1').get().total;
+  }
+  if (canSeeInventory) {
+    Object.assign(stats, db.prepare(`SELECT
+      (SELECT COUNT(*) FROM products WHERE active = 1 AND stock <= min_stock) AS lowStockCount,
+      (SELECT COALESCE(SUM(stock * cost), 0) FROM products WHERE active = 1) AS inventoryCost`).get());
+    lowStock = db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
+      WHERE active = 1 AND stock <= min_stock ORDER BY stock - min_stock LIMIT 6`).all();
+  }
+  if (canSeeSales) {
+    Object.assign(stats, db.prepare(`SELECT
+      (SELECT COALESCE(SUM(total), 0) FROM sales WHERE status = 'COMPLETED' AND date(created_at, 'localtime') = date('now', 'localtime')) AS salesToday,
+      (SELECT COUNT(*) FROM sales WHERE status = 'COMPLETED' AND date(created_at, 'localtime') = date('now', 'localtime')) AS salesCountToday`).get());
+    recentSales = db.prepare(`SELECT s.id, s.number, s.total, s.payment_method, s.status, s.created_at, u.name AS user_name
+      FROM sales s JOIN users u ON u.id = s.user_id ORDER BY s.id DESC LIMIT 6`).all();
+    salesByDay = db.prepare(`WITH RECURSIVE days(day) AS (
+      SELECT date('now', '-6 days') UNION ALL SELECT date(day, '+1 day') FROM days WHERE day < date('now')
+    ) SELECT days.day, COALESCE(SUM(s.total), 0) AS total FROM days
+      LEFT JOIN sales s ON date(s.created_at, 'localtime') = days.day AND s.status = 'COMPLETED'
+      GROUP BY days.day ORDER BY days.day`).all();
+  }
   res.json({ stats, lowStock, recentSales, salesByDay });
 });
 
@@ -116,14 +129,14 @@ app.get('/api/categories', authenticate, permit('products.view'), (_req, res) =>
   res.json(db.prepare('SELECT id, name, active, created_at FROM categories ORDER BY name').all());
 });
 
-app.post('/api/categories', authenticate, permit('products.manage'), (req, res) => {
+app.post('/api/categories', authenticate, permit('categories.manage'), (req, res) => {
   const name = cleanText(req.body.name, 'Nome da categoria');
   const result = db.prepare('INSERT INTO categories(name) VALUES (?)').run(name);
   audit(db, req.user.id, 'CREATE', 'CATEGORY', result.lastInsertRowid, { name });
   res.status(201).json(db.prepare('SELECT * FROM categories WHERE id = ?').get(result.lastInsertRowid));
 });
 
-app.put('/api/categories/:id', authenticate, permit('products.manage'), (req, res) => {
+app.put('/api/categories/:id', authenticate, permit('categories.manage'), (req, res) => {
   const name = cleanText(req.body.name, 'Nome da categoria');
   const result = db.prepare('UPDATE categories SET name = ?, active = ? WHERE id = ?')
     .run(name, bool(req.body.active) ? 1 : 0, req.params.id);
@@ -132,7 +145,10 @@ app.put('/api/categories/:id', authenticate, permit('products.manage'), (req, re
   res.json(db.prepare('SELECT * FROM categories WHERE id = ?').get(req.params.id));
 });
 
-app.get('/api/products', authenticate, permit('products.view'), (req, res) => {
+app.get('/api/products', authenticate, (req, res) => {
+  if (!req.user.permissions.some(code => ['products.view', 'stock.view', 'sales.create'].includes(code))) {
+    return res.status(403).json({ error: 'Sem permissão para consultar produtos.' });
+  }
   const search = `%${String(req.query.search || '').trim()}%`;
   const active = req.query.active === 'all' ? null : req.query.active === 'false' ? 0 : 1;
   const categoryId = Number(req.query.categoryId) || null;
@@ -142,11 +158,20 @@ app.get('/api/products', authenticate, permit('products.view'), (req, res) => {
       AND (@categoryId IS NULL OR p.category_id = @categoryId)
       AND (p.name LIKE @search OR p.sku LIKE @search OR COALESCE(p.barcode, '') LIKE @search)
     ORDER BY p.name`).all({ active, categoryId, search });
-  res.json(products);
+  res.json(products.map(product => productPayload(product, req.user)));
 });
 
-app.post('/api/products', authenticate, permit('products.manage'), (req, res) => {
-  const data = parseProduct(req.body);
+app.post('/api/products', authenticate, permit('products.create'), (req, res) => {
+  const requestedStock = numeric(req.body.stock || 0, 'Estoque inicial');
+  if (requestedStock > 0 && !req.user.permissions.includes('stock.entry')) {
+    return res.status(403).json({ error: 'Sem permissão para registrar o estoque inicial.' });
+  }
+  const data = parseProduct({
+    ...req.body,
+    cost: req.user.permissions.includes('products.view_cost') ? req.body.cost : 0,
+    stock: requestedStock,
+    minStock: req.user.permissions.includes('products.view_stock') ? req.body.minStock : 0
+  });
   const create = db.transaction(() => {
     const result = db.prepare(`INSERT INTO products
       (sku, barcode, name, description, category_id, cost, price, stock, min_stock)
@@ -158,21 +183,29 @@ app.post('/api/products', authenticate, permit('products.manage'), (req, res) =>
     return result.lastInsertRowid;
   });
   const id = create();
-  res.status(201).json(getProduct(id));
+  res.status(201).json(productPayload(getProduct(id), req.user));
 });
 
-app.put('/api/products/:id', authenticate, permit('products.manage'), (req, res) => {
+app.put('/api/products/:id', authenticate, permit('products.edit'), (req, res) => {
   const existing = getProduct(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Produto não encontrado.' });
-  const data = parseProduct(req.body, existing.stock);
+  const requestedActive = bool(req.body.active ?? existing.active) ? 1 : 0;
+  if (requestedActive !== existing.active && !req.user.permissions.includes('products.deactivate')) {
+    return res.status(403).json({ error: 'Sem permissão para alterar o status do produto.' });
+  }
+  const data = parseProduct({
+    ...req.body,
+    cost: req.user.permissions.includes('products.view_cost') ? req.body.cost : existing.cost,
+    minStock: req.user.permissions.includes('products.view_stock') ? req.body.minStock : existing.min_stock
+  }, existing);
   db.prepare(`UPDATE products SET sku=@sku, barcode=@barcode, name=@name, description=@description,
     category_id=@categoryId, cost=@cost, price=@price, min_stock=@minStock, active=@active,
-    updated_at=CURRENT_TIMESTAMP WHERE id=@id`).run({ ...data, active: bool(req.body.active ?? existing.active) ? 1 : 0, id: req.params.id });
+    updated_at=CURRENT_TIMESTAMP WHERE id=@id`).run({ ...data, active: requestedActive, id: req.params.id });
   audit(db, req.user.id, 'UPDATE', 'PRODUCT', req.params.id, { sku: data.sku, name: data.name });
-  res.json(getProduct(req.params.id));
+  res.json(productPayload(getProduct(req.params.id), req.user));
 });
 
-app.delete('/api/products/:id', authenticate, permit('products.manage'), (req, res) => {
+app.delete('/api/products/:id', authenticate, permit('products.deactivate'), (req, res) => {
   const result = db.prepare('UPDATE products SET active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(req.params.id);
   if (!result.changes) return res.status(404).json({ error: 'Produto não encontrado.' });
   audit(db, req.user.id, 'DEACTIVATE', 'PRODUCT', req.params.id);
@@ -181,23 +214,29 @@ app.delete('/api/products/:id', authenticate, permit('products.manage'), (req, r
 
 app.get('/api/stock/movements', authenticate, permit('stock.view'), (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
-  res.json(db.prepare(`SELECT m.*, p.name AS product_name, p.sku, u.name AS user_name
+  const movements = db.prepare(`SELECT m.*, p.name AS product_name, p.sku, u.name AS user_name
     FROM stock_movements m JOIN products p ON p.id = m.product_id JOIN users u ON u.id = m.user_id
-    ORDER BY m.id DESC LIMIT ?`).all(limit));
+    ORDER BY m.id DESC LIMIT ?`).all(limit);
+  if (!req.user.permissions.includes('products.view_cost')) movements.forEach(item => delete item.unit_cost);
+  res.json(movements);
 });
 
-app.post('/api/stock/movements', authenticate, permit('stock.manage'), (req, res) => {
+app.post('/api/stock/movements', authenticate, (req, res) => {
   const product = getProduct(req.body.productId);
   if (!product || !product.active) return res.status(404).json({ error: 'Produto não encontrado ou inativo.' });
   const type = cleanText(req.body.type, 'Tipo').toUpperCase();
   if (!['ENTRY', 'EXIT', 'ADJUSTMENT'].includes(type)) throw Object.assign(new Error('Tipo de movimentação inválido.'), { status: 400 });
+  const requiredPermission = { ENTRY: 'stock.entry', EXIT: 'stock.exit', ADJUSTMENT: 'stock.adjust' }[type];
+  if (!req.user.permissions.includes(requiredPermission)) return res.status(403).json({ error: 'Sem permissão para esta operação de estoque.' });
   const inputQuantity = numeric(req.body.quantity, 'Quantidade');
   const resultingStock = type === 'ENTRY' ? product.stock + inputQuantity
     : type === 'EXIT' ? product.stock - inputQuantity
     : inputQuantity;
   if (resultingStock < 0) return res.status(409).json({ error: 'Estoque insuficiente para esta saída.' });
   const movementQuantity = type === 'ADJUSTMENT' ? resultingStock - product.stock : inputQuantity;
-  const unitCost = req.body.unitCost === '' || req.body.unitCost == null ? product.cost : numeric(req.body.unitCost, 'Custo unitário');
+  const unitCost = !req.user.permissions.includes('products.view_cost') || req.body.unitCost === '' || req.body.unitCost == null
+    ? product.cost
+    : numeric(req.body.unitCost, 'Custo unitário');
   const note = optionalText(req.body.note, 300);
   const create = db.transaction(() => {
     db.prepare('UPDATE products SET stock = ?, cost = CASE WHEN ? = \'ENTRY\' THEN ? ELSE cost END, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
@@ -221,7 +260,7 @@ app.get('/api/sales', authenticate, permit('sales.view'), (req, res) => {
     WHERE date(s.created_at, 'localtime') BETWEEN date(?) AND date(?) ORDER BY s.id DESC LIMIT 500`).all(from, to));
 });
 
-app.get('/api/sales/:id', authenticate, permit('sales.view'), (req, res) => {
+app.get('/api/sales/:id', authenticate, permit('sales.details'), (req, res) => {
   const sale = db.prepare(`SELECT s.*, u.name AS user_name FROM sales s JOIN users u ON u.id=s.user_id WHERE s.id=?`).get(req.params.id);
   if (!sale) return res.status(404).json({ error: 'Venda não encontrada.' });
   sale.items = db.prepare(`SELECT si.*, p.name AS product_name, p.sku FROM sale_items si
@@ -232,6 +271,9 @@ app.get('/api/sales/:id', authenticate, permit('sales.view'), (req, res) => {
 app.post('/api/sales', authenticate, permit('sales.create'), (req, res) => {
   if (!Array.isArray(req.body.items) || !req.body.items.length) throw Object.assign(new Error('Adicione ao menos um item à venda.'), { status: 400 });
   const discount = numeric(req.body.discount || 0, 'Desconto');
+  if (discount > 0 && !req.user.permissions.includes('sales.discount')) {
+    return res.status(403).json({ error: 'Sem permissão para aplicar descontos.' });
+  }
   const paymentMethod = cleanText(req.body.paymentMethod, 'Forma de pagamento', 40);
   const grouped = new Map();
   for (const item of req.body.items) {
@@ -287,27 +329,34 @@ app.post('/api/sales/:id/cancel', authenticate, permit('sales.cancel'), (req, re
 app.get('/api/reports/summary', authenticate, permit('reports.view'), (req, res) => {
   const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
   const to = String(req.query.to || new Date().toISOString().slice(0, 10));
-  const summary = db.prepare(`SELECT COUNT(*) AS saleCount, COALESCE(SUM(total),0) AS revenue,
-    COALESCE(AVG(total),0) AS averageTicket FROM sales WHERE status='COMPLETED'
-    AND date(created_at,'localtime') BETWEEN date(?) AND date(?)`).get(from, to);
-  const topProducts = db.prepare(`SELECT p.name, p.sku, SUM(si.quantity) AS quantity, SUM(si.total) AS revenue
-    FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
-    WHERE s.status='COMPLETED' AND date(s.created_at,'localtime') BETWEEN date(?) AND date(?)
-    GROUP BY p.id ORDER BY quantity DESC LIMIT 10`).all(from, to);
-  const lowStock = db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
-    WHERE active=1 AND stock<=min_stock ORDER BY stock-min_stock`).all();
-  const daily = db.prepare(`SELECT date(created_at,'localtime') AS day, COUNT(*) AS count, SUM(total) AS total
-    FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)
-    GROUP BY day ORDER BY day`).all(from, to);
-  res.json({ from, to, summary, topProducts, lowStock, daily });
+  let sales = null;
+  let inventory = null;
+  if (req.user.permissions.includes('reports.sales')) {
+    const summary = db.prepare(`SELECT COUNT(*) AS saleCount, COALESCE(SUM(total),0) AS revenue,
+      COALESCE(AVG(total),0) AS averageTicket FROM sales WHERE status='COMPLETED'
+      AND date(created_at,'localtime') BETWEEN date(?) AND date(?)`).get(from, to);
+    const topProducts = db.prepare(`SELECT p.name, p.sku, SUM(si.quantity) AS quantity, SUM(si.total) AS revenue
+      FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+      WHERE s.status='COMPLETED' AND date(s.created_at,'localtime') BETWEEN date(?) AND date(?)
+      GROUP BY p.id ORDER BY quantity DESC LIMIT 10`).all(from, to);
+    const daily = db.prepare(`SELECT date(created_at,'localtime') AS day, COUNT(*) AS count, SUM(total) AS total
+      FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)
+      GROUP BY day ORDER BY day`).all(from, to);
+    sales = { summary, topProducts, daily };
+  }
+  if (req.user.permissions.includes('reports.inventory')) {
+    inventory = { lowStock: db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
+      WHERE active=1 AND stock<=min_stock ORDER BY stock-min_stock`).all() };
+  }
+  res.json({ from, to, sales, inventory });
 });
 
-app.get('/api/users', authenticate, permit('users.manage'), (_req, res) => {
+app.get('/api/users', authenticate, permit('users.view'), (_req, res) => {
   res.json(db.prepare(`SELECT u.id,u.name,u.email,u.active,u.group_id,u.created_at,g.name AS group_name
     FROM users u JOIN access_groups g ON g.id=u.group_id ORDER BY u.name`).all());
 });
 
-app.post('/api/users', authenticate, permit('users.manage'), (req, res) => {
+app.post('/api/users', authenticate, permit('users.create'), (req, res) => {
   const name = cleanText(req.body.name, 'Nome');
   const email = cleanText(req.body.email, 'E-mail').toLowerCase();
   const password = cleanText(req.body.password, 'Senha', 200);
@@ -319,7 +368,7 @@ app.post('/api/users', authenticate, permit('users.manage'), (req, res) => {
   res.status(201).json({ id: result.lastInsertRowid, name, email, groupId });
 });
 
-app.put('/api/users/:id', authenticate, permit('users.manage'), (req, res) => {
+app.put('/api/users/:id', authenticate, permit('users.edit'), (req, res) => {
   const existing = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Usuário não encontrado.' });
   if (demoMode && protectedDemoUsers.has(existing.email)) {
@@ -344,19 +393,20 @@ app.put('/api/users/:id', authenticate, permit('users.manage'), (req, res) => {
 });
 
 app.get('/api/groups', authenticate, (req, res) => {
-  if (!req.user.permissions.includes('groups.manage') && !req.user.permissions.includes('users.manage')) {
+  const canViewGroups = req.user.permissions.includes('groups.view');
+  if (!canViewGroups && !req.user.permissions.includes('users.view')) {
     return res.status(403).json({ error: 'Sem permissão para visualizar grupos.' });
   }
   const groups = db.prepare('SELECT * FROM access_groups ORDER BY name').all();
   const byGroup = db.prepare('SELECT permission_code FROM group_permissions WHERE group_id=?');
-  res.json(groups.map(group => ({ ...group, permissions: byGroup.all(group.id).map(item => item.permission_code) })));
+  res.json(groups.map(group => ({ ...group, permissions: canViewGroups ? byGroup.all(group.id).map(item => item.permission_code) : undefined })));
 });
 
-app.get('/api/permissions', authenticate, permit('groups.manage'), (_req, res) => {
+app.get('/api/permissions', authenticate, permit('groups.view'), (_req, res) => {
   res.json(db.prepare('SELECT * FROM permissions ORDER BY module,label').all());
 });
 
-app.post('/api/groups', authenticate, permit('groups.manage'), (req, res) => {
+app.post('/api/groups', authenticate, permit('groups.create'), (req, res) => {
   const name = cleanText(req.body.name, 'Nome do grupo');
   const description = optionalText(req.body.description, 300);
   const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : [];
@@ -370,7 +420,7 @@ app.post('/api/groups', authenticate, permit('groups.manage'), (req, res) => {
   res.status(201).json({ id, name, description, permissions });
 });
 
-app.put('/api/groups/:id', authenticate, permit('groups.manage'), (req, res) => {
+app.put('/api/groups/:id', authenticate, permit('groups.edit'), (req, res) => {
   const group = db.prepare('SELECT * FROM access_groups WHERE id=?').get(req.params.id);
   if (!group) return res.status(404).json({ error: 'Grupo não encontrado.' });
   if (demoMode && group.is_system) {
@@ -379,8 +429,8 @@ app.put('/api/groups/:id', authenticate, permit('groups.manage'), (req, res) => 
   const name = cleanText(req.body.name, 'Nome do grupo');
   const description = optionalText(req.body.description, 300);
   const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : [];
-  if (group.name === 'Administradores' && !permissions.includes('groups.manage')) {
-    throw Object.assign(new Error('O grupo Administradores deve manter a gestão de permissões.'), { status: 400 });
+  if (group.name === 'Administradores' && (!permissions.includes('groups.view') || !permissions.includes('groups.edit'))) {
+    throw Object.assign(new Error('O grupo Administradores deve manter acesso ao menu e à gestão de permissões.'), { status: 400 });
   }
   db.transaction(() => {
     db.prepare('UPDATE access_groups SET name=?,description=? WHERE id=?').run(name, description, group.id);
@@ -394,22 +444,33 @@ app.put('/api/groups/:id', authenticate, permit('groups.manage'), (req, res) => 
 
 app.get('/api/audit', authenticate, permit('audit.view'), (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
-  res.json(db.prepare(`SELECT a.*,u.name AS user_name FROM audit_logs a
-    LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT ?`).all(limit));
+  const logs = db.prepare(`SELECT a.*,u.name AS user_name FROM audit_logs a
+    LEFT JOIN users u ON u.id=a.user_id ORDER BY a.id DESC LIMIT ?`).all(limit);
+  if (!req.user.permissions.includes('audit.details')) logs.forEach(log => delete log.details);
+  res.json(logs);
 });
 
-function parseProduct(body, existingStock = null) {
+function parseProduct(body, existing = null) {
   return {
     sku: cleanText(body.sku, 'SKU', 60).toUpperCase(),
     barcode: optionalText(body.barcode, 80) || null,
     name: cleanText(body.name, 'Nome do produto'),
     description: optionalText(body.description),
     categoryId: body.categoryId ? numeric(body.categoryId, 'Categoria', { allowZero: false }) : null,
-    cost: numeric(body.cost, 'Custo'),
-    price: numeric(body.price, 'Preço'),
-    stock: existingStock ?? numeric(body.stock || 0, 'Estoque inicial'),
-    minStock: numeric(body.minStock || 0, 'Estoque mínimo')
+    cost: numeric(body.cost ?? existing?.cost, 'Custo'),
+    price: numeric(body.price ?? existing?.price, 'Preço'),
+    stock: existing?.stock ?? numeric(body.stock || 0, 'Estoque inicial'),
+    minStock: numeric(body.minStock ?? existing?.min_stock ?? 0, 'Estoque mínimo')
   };
+}
+
+function productPayload(product, user) {
+  const result = { ...product };
+  if (!user.permissions.includes('products.view_cost')) delete result.cost;
+  const canSeeStock = user.permissions.some(code => ['products.view_stock', 'stock.view', 'sales.create'].includes(code));
+  if (!canSeeStock) delete result.stock;
+  if (!user.permissions.includes('products.view_stock') && !user.permissions.includes('stock.view')) delete result.min_stock;
+  return result;
 }
 
 function getProduct(id) {

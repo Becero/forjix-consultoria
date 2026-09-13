@@ -106,6 +106,10 @@ export function createDatabase(filename = path.join(dataDir, 'forjix-estoque.db'
       details TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS app_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
     CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
     CREATE INDEX IF NOT EXISTS idx_movements_created ON stock_movements(created_at);
     CREATE INDEX IF NOT EXISTS idx_sales_created ON sales(created_at);
@@ -117,17 +121,40 @@ export function createDatabase(filename = path.join(dataDir, 'forjix-estoque.db'
 }
 
 function seed(db) {
-  const insertPermission = db.prepare('INSERT OR IGNORE INTO permissions(code, label, module) VALUES (?, ?, ?)');
+  const insertPermission = db.prepare(`INSERT INTO permissions(code, label, module) VALUES (?, ?, ?)
+    ON CONFLICT(code) DO UPDATE SET label=excluded.label, module=excluded.module`);
   const insertGroup = db.prepare('INSERT OR IGNORE INTO access_groups(name, description, is_system) VALUES (?, ?, 1)');
   const findGroup = db.prepare('SELECT id FROM access_groups WHERE name = ?');
   const grant = db.prepare('INSERT OR IGNORE INTO group_permissions(group_id, permission_code) VALUES (?, ?)');
 
   db.transaction(() => {
     for (const permission of PERMISSIONS) insertPermission.run(...permission);
-    for (const [name, permissions] of Object.entries(DEFAULT_GROUPS)) {
+    for (const name of Object.keys(DEFAULT_GROUPS)) {
       insertGroup.run(name, `Grupo padrão: ${name}`);
-      const groupId = findGroup.get(name).id;
-      for (const code of permissions) grant.run(groupId, code);
+    }
+
+    const permissionVersion = db.prepare("SELECT value FROM app_meta WHERE key='permission_schema'").get()?.value;
+    if (permissionVersion !== '2') {
+      const legacyMappings = {
+        'products.manage': ['products.create', 'products.edit', 'products.deactivate', 'categories.manage'],
+        'stock.manage': ['stock.entry', 'stock.exit', 'stock.adjust'],
+        'users.manage': ['users.view', 'users.create', 'users.edit'],
+        'groups.manage': ['groups.view', 'groups.create', 'groups.edit']
+      };
+      for (const [legacyCode, replacements] of Object.entries(legacyMappings)) {
+        const groups = db.prepare('SELECT group_id FROM group_permissions WHERE permission_code=?').all(legacyCode);
+        for (const group of groups) replacements.forEach(code => grant.run(group.group_id, code));
+      }
+      for (const [name, permissions] of Object.entries(DEFAULT_GROUPS)) {
+        const groupId = findGroup.get(name).id;
+        permissions.forEach(code => grant.run(groupId, code));
+      }
+      const deprecated = Object.keys(legacyMappings);
+      const removeGrant = db.prepare('DELETE FROM group_permissions WHERE permission_code=?');
+      const removePermission = db.prepare('DELETE FROM permissions WHERE code=?');
+      deprecated.forEach(code => { removeGrant.run(code); removePermission.run(code); });
+      db.prepare(`INSERT INTO app_meta(key,value) VALUES ('permission_schema','2')
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
     }
   })();
 
