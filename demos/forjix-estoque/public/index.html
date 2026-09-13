@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b1220" />
+  <meta name="description" content="Forjix Estoque — controle de produtos, estoque e vendas." />
+  <title>Forjix Estoque</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <section class="login-screen" id="login-screen">
+    <div class="login-brand">
+      <img src="/forjix-logo.png" alt="Forjix" />
+      <span>ESTOQUE</span>
+    </div>
+    <div class="login-layout">
+      <div class="login-intro">
+        <span class="eyebrow">GESTÃO EM UM SÓ LUGAR</span>
+        <h1>Controle simples.<br><em>Decisões melhores.</em></h1>
+        <p>Produtos, movimentações, vendas e acessos organizados para o dia a dia do negócio.</p>
+        <ul>
+          <li>Estoque atualizado a cada operação</li>
+          <li>Frente de caixa rápida e objetiva</li>
+          <li>Permissões configuráveis por grupo</li>
+        </ul>
+      </div>
+      <form class="login-card" id="login-form">
+        <div>
+          <span class="eyebrow">ACESSO AO SISTEMA</span>
+          <h2>Bem-vindo</h2>
+          <p>Entre com seus dados para continuar.</p>
+        </div>
+        <label>E-mail<input type="email" name="email" autocomplete="username" value="admin@forjix.local" required /></label>
+        <label>Senha<input type="password" name="password" autocomplete="current-password" value="Forjix@123" required /></label>
+        <button class="button primary" type="submit">Entrar no sistema</button>
+        <p class="form-error" id="login-error" role="alert"></p>
+        <details class="demo-access">
+          <summary>Acessos de demonstração</summary>
+          <button type="button" data-demo="admin@forjix.local">Administrador</button>
+          <button type="button" data-demo="vendas@forjix.local">Operador de vendas</button>
+          <button type="button" data-demo="estoque@forjix.local">Responsável pelo estoque</button>
+          <small>Senha para todos: <strong>Forjix@123</strong></small>
+        </details>
+      </form>
+    </div>
+  </section>
+
+  <div class="app-shell" id="app-shell" hidden>
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-brand">
+        <img src="/forjix-logo.png" alt="Forjix" />
+        <span>ESTOQUE</span>
+      </div>
+      <nav class="main-nav" aria-label="Navegação principal">
+        <button data-view="dashboard" data-permission="dashboard.view"><span>⌂</span>Painel</button>
+        <button data-view="products" data-permission="products.view"><span>□</span>Produtos</button>
+        <button data-view="stock" data-permission="stock.view"><span>↕</span>Estoque</button>
+        <button data-view="pos" data-permission="sales.create"><span>▤</span>Frente de caixa</button>
+        <button data-view="sales" data-permission="sales.view"><span>◷</span>Vendas</button>
+        <button data-view="reports" data-permission="reports.view"><span>▥</span>Relatórios</button>
+        <div class="nav-divider" data-admin>ADMINISTRAÇÃO</div>
+        <button data-view="users" data-permission="users.manage"><span>♙</span>Usuários</button>
+        <button data-view="groups" data-permission="groups.manage"><span>⚿</span>Grupos de acesso</button>
+        <button data-view="audit" data-permission="audit.view"><span>≣</span>Auditoria</button>
+      </nav>
+      <div class="sidebar-footer">
+        <span>Projeto demonstrativo</span>
+        <strong>Forjix Consultoria</strong>
+      </div>
+    </aside>
+
+    <div class="app-area">
+      <header class="topbar">
+        <button class="menu-button" id="menu-button" aria-label="Abrir menu">☰</button>
+        <div><span id="page-kicker">VISÃO GERAL</span><h1 id="page-title">Painel</h1></div>
+        <div class="user-menu">
+          <div class="avatar" id="user-avatar">F</div>
+          <div><strong id="user-name">Usuário</strong><span id="user-group">Grupo</span></div>
+          <button class="icon-button" id="logout-button" title="Sair" aria-label="Sair">↪</button>
+        </div>
+      </header>
+      <main class="content" id="content" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <dialog class="modal" id="modal">
+    <form method="dialog" class="modal-card" id="modal-form">
+      <header><div><span class="eyebrow" id="modal-kicker">CADASTRO</span><h2 id="modal-title">Novo registro</h2></div><button class="icon-button" value="cancel" aria-label="Fechar">×</button></header>
+      <div class="modal-body" id="modal-body"></div>
+      <footer><button class="button secondary" value="cancel">Cancelar</button><button class="button primary" id="modal-submit" value="default">Salvar</button></footer>
+    </form>
+  </dialog>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

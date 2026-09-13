@@ -40,3 +40,9 @@ Pode ser publicado diretamente em:
 - Hospedagem convencional
 
 Não requer backend.
+
+## Projeto demonstrativo
+
+O sistema funcional de estoque e frente de caixa está em
+[`demos/forjix-estoque`](demos/forjix-estoque/README.md). Ele possui API, banco de
+dados e instruções próprias de execução.
