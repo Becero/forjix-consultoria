@@ -1,6 +1,8 @@
 import express from 'express';
 import helmet from 'helmet';
 import bcrypt from 'bcryptjs';
+import PDFDocument from 'pdfkit';
+import writeExcelFile from 'write-excel-file/node';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDatabase, audit } from './src/db.js';
@@ -52,6 +54,15 @@ function numeric(value, field, { min = 0, allowZero = true } = {}) {
 
 function bool(value) {
   return value === true || value === 1 || value === '1';
+}
+
+function reportDate(value, fallback, field) {
+  const text = String(value || fallback);
+  const parsed = new Date(`${text}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== text) {
+    throw Object.assign(new Error(`${field} possui uma data inválida.`), { status: 400 });
+  }
+  return text;
 }
 
 function userPayload(user) {
@@ -327,28 +338,38 @@ app.post('/api/sales/:id/cancel', authenticate, permit('sales.cancel'), (req, re
 });
 
 app.get('/api/reports/summary', authenticate, permit('reports.view'), (req, res) => {
-  const from = String(req.query.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
-  const to = String(req.query.to || new Date().toISOString().slice(0, 10));
-  let sales = null;
-  let inventory = null;
-  if (req.user.permissions.includes('reports.sales')) {
-    const summary = db.prepare(`SELECT COUNT(*) AS saleCount, COALESCE(SUM(total),0) AS revenue,
-      COALESCE(AVG(total),0) AS averageTicket FROM sales WHERE status='COMPLETED'
-      AND date(created_at,'localtime') BETWEEN date(?) AND date(?)`).get(from, to);
-    const topProducts = db.prepare(`SELECT p.name, p.sku, SUM(si.quantity) AS quantity, SUM(si.total) AS revenue
-      FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
-      WHERE s.status='COMPLETED' AND date(s.created_at,'localtime') BETWEEN date(?) AND date(?)
-      GROUP BY p.id ORDER BY quantity DESC LIMIT 10`).all(from, to);
-    const daily = db.prepare(`SELECT date(created_at,'localtime') AS day, COUNT(*) AS count, SUM(total) AS total
-      FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)
-      GROUP BY day ORDER BY day`).all(from, to);
-    sales = { summary, topProducts, daily };
-  }
-  if (req.user.permissions.includes('reports.inventory')) {
-    inventory = { lowStock: db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
-      WHERE active=1 AND stock<=min_stock ORDER BY stock-min_stock`).all() };
-  }
-  res.json({ from, to, sales, inventory });
+  const from = reportDate(req.query.from, new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10), 'Data inicial');
+  const to = reportDate(req.query.to, new Date().toISOString().slice(0, 10), 'Data final');
+  if (from > to) return res.status(400).json({ error: 'A data inicial não pode ser posterior à data final.' });
+  res.json(buildReportData(req.user, from, to));
+});
+
+app.get('/api/reports/export', authenticate, permit('reports.view'), async (req, res) => {
+  const from = reportDate(req.query.from, new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10), 'Data inicial');
+  const to = reportDate(req.query.to, new Date().toISOString().slice(0, 10), 'Data final');
+  if (from > to) return res.status(400).json({ error: 'A data inicial não pode ser posterior à data final.' });
+  const format = String(req.query.format || '').toLowerCase();
+  const type = String(req.query.type || 'complete').toLowerCase();
+  if (!['xlsx', 'pdf'].includes(format)) return res.status(400).json({ error: 'Formato de exportação inválido.' });
+  if (!['complete', 'sales', 'inventory'].includes(type)) return res.status(400).json({ error: 'Tipo de relatório inválido.' });
+  if (type === 'sales' && !req.user.permissions.includes('reports.sales')) return res.status(403).json({ error: 'Sem permissão para exportar vendas.' });
+  if (type === 'inventory' && !req.user.permissions.includes('reports.inventory')) return res.status(403).json({ error: 'Sem permissão para exportar estoque.' });
+
+  const report = buildReportData(req.user, from, to, true);
+  if (!report.sales && !report.inventory) return res.status(403).json({ error: 'Seu grupo não possui conteúdo liberado para exportação.' });
+  const selected = {
+    ...report,
+    sales: type === 'inventory' ? null : report.sales,
+    inventory: type === 'sales' ? null : report.inventory
+  };
+  const buffer = format === 'xlsx' ? await createReportWorkbook(selected) : await createReportPdf(selected, req.user);
+  const extension = format === 'xlsx' ? 'xlsx' : 'pdf';
+  const filename = `forjix-relatorio-${type}-${from}-a-${to}.${extension}`;
+  res.setHeader('Content-Type', format === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('Content-Length', buffer.length);
+  audit(db, req.user.id, 'EXPORT', 'REPORT', type, { format, from, to });
+  res.send(buffer);
 });
 
 app.get('/api/users', authenticate, permit('users.view'), (_req, res) => {
@@ -449,6 +470,166 @@ app.get('/api/audit', authenticate, permit('audit.view'), (req, res) => {
   if (!req.user.permissions.includes('audit.details')) logs.forEach(log => delete log.details);
   res.json(logs);
 });
+
+function buildReportData(user, from, to, includeExportDetails = false) {
+  let sales = null;
+  let inventory = null;
+  if (user.permissions.includes('reports.sales')) {
+    const summary = db.prepare(`SELECT COUNT(*) AS saleCount, COALESCE(SUM(total),0) AS revenue,
+      COALESCE(SUM(discount),0) AS discounts, COALESCE(AVG(total),0) AS averageTicket
+      FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)`).get(from, to);
+    const topProducts = db.prepare(`SELECT p.name, p.sku, SUM(si.quantity) AS quantity, SUM(si.total) AS revenue
+      FROM sale_items si JOIN sales s ON s.id=si.sale_id JOIN products p ON p.id=si.product_id
+      WHERE s.status='COMPLETED' AND date(s.created_at,'localtime') BETWEEN date(?) AND date(?)
+      GROUP BY p.id ORDER BY quantity DESC LIMIT 10`).all(from, to);
+    const daily = db.prepare(`SELECT date(created_at,'localtime') AS day, COUNT(*) AS count, SUM(total) AS total
+      FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)
+      GROUP BY day ORDER BY day`).all(from, to);
+    const paymentMethods = db.prepare(`SELECT payment_method AS method, COUNT(*) AS count, SUM(total) AS total
+      FROM sales WHERE status='COMPLETED' AND date(created_at,'localtime') BETWEEN date(?) AND date(?)
+      GROUP BY payment_method ORDER BY total DESC`).all(from, to);
+    const transactions = db.prepare(`SELECT s.number, s.created_at, u.name AS user_name, s.payment_method,
+      s.subtotal, s.discount, s.total FROM sales s JOIN users u ON u.id=s.user_id
+      WHERE s.status='COMPLETED' AND date(s.created_at,'localtime') BETWEEN date(?) AND date(?)
+      ORDER BY s.id DESC LIMIT ?`).all(from, to, includeExportDetails ? 1000 : 10);
+    sales = { summary, topProducts, daily, paymentMethods, transactions };
+  }
+  if (user.permissions.includes('reports.inventory')) {
+    const canSeeCost = user.permissions.includes('products.view_cost');
+    const summaryRow = db.prepare(`SELECT COUNT(*) AS productCount, COALESCE(SUM(stock),0) AS totalStock,
+      COALESCE(SUM(CASE WHEN stock<=min_stock THEN 1 ELSE 0 END),0) AS lowStockCount,
+      COALESCE(SUM(stock*cost),0) AS inventoryValue FROM products WHERE active=1`).get();
+    const summary = {
+      productCount: summaryRow.productCount,
+      totalStock: summaryRow.totalStock,
+      lowStockCount: summaryRow.lowStockCount,
+      ...(canSeeCost ? { inventoryValue: summaryRow.inventoryValue } : {})
+    };
+    const lowStock = db.prepare(`SELECT id, sku, name, stock, min_stock FROM products
+      WHERE active=1 AND stock<=min_stock ORDER BY stock-min_stock`).all();
+    const categorySummary = db.prepare(`SELECT COALESCE(c.name,'Sem categoria') AS category,
+      COUNT(*) AS productCount, COALESCE(SUM(p.stock),0) AS totalStock, COALESCE(SUM(p.stock*p.cost),0) AS inventoryValue
+      FROM products p LEFT JOIN categories c ON c.id=p.category_id WHERE p.active=1
+      GROUP BY p.category_id ORDER BY category`).all().map(item => canSeeCost ? item : (({ inventoryValue, ...safe }) => safe)(item));
+    const products = includeExportDetails ? db.prepare(`SELECT p.sku,p.name,COALESCE(c.name,'Sem categoria') AS category,
+      p.stock,p.min_stock,p.cost,p.price,p.active FROM products p LEFT JOIN categories c ON c.id=p.category_id
+      ORDER BY p.name LIMIT 5000`).all().map(item => canSeeCost ? item : (({ cost, ...safe }) => safe)(item)) : [];
+    inventory = { summary, lowStock, categorySummary, products, canSeeCost };
+  }
+  return { from, to, generatedAt: new Date().toISOString(), sales, inventory };
+}
+
+const excelHeader = value => ({ value, type: String, fontWeight: 'bold', backgroundColor: '#0b1424', fontColor: '#ffffff' });
+const excelTitle = value => ({ value, type: String, fontWeight: 'bold', fontSize: 16, fontColor: '#ff6b35' });
+const excelMoney = value => ({ value: Number(value || 0), type: Number, format: 'R$ #,##0.00' });
+
+async function createReportWorkbook(report) {
+  const sheets = [];
+  if (report.sales) {
+    const { summary, topProducts, paymentMethods, transactions } = report.sales;
+    const rows = [
+      [excelTitle('FORJIX · Relatório de vendas')],
+      [`Período: ${report.from} a ${report.to}`],
+      [],
+      [excelHeader('Indicador'), excelHeader('Valor')],
+      ['Faturamento', excelMoney(summary.revenue)],
+      ['Vendas concluídas', Number(summary.saleCount)],
+      ['Ticket médio', excelMoney(summary.averageTicket)],
+      ['Descontos concedidos', excelMoney(summary.discounts)],
+      [],
+      [excelHeader('Produtos mais vendidos'), excelHeader('SKU'), excelHeader('Quantidade'), excelHeader('Receita')],
+      ...topProducts.map(item => [item.name, item.sku, Number(item.quantity), excelMoney(item.revenue)]),
+      [],
+      [excelHeader('Forma de pagamento'), excelHeader('Vendas'), excelHeader('Total')],
+      ...paymentMethods.map(item => [item.method, Number(item.count), excelMoney(item.total)]),
+      [],
+      [excelHeader('Venda'), excelHeader('Data'), excelHeader('Operador'), excelHeader('Pagamento'), excelHeader('Subtotal'), excelHeader('Desconto'), excelHeader('Total')],
+      ...transactions.map(item => [item.number, item.created_at, item.user_name, item.payment_method, excelMoney(item.subtotal), excelMoney(item.discount), excelMoney(item.total)])
+    ];
+    sheets.push({ sheet: 'Vendas', data: rows, columns: [{ width: 28 }, { width: 20 }, { width: 24 }, { width: 22 }, { width: 16 }, { width: 16 }, { width: 16 }], stickyRowsCount: 2 });
+  }
+  if (report.inventory) {
+    const { summary, categorySummary, products, canSeeCost } = report.inventory;
+    const rows = [
+      [excelTitle('FORJIX · Relatório de estoque')],
+      [`Gerado em: ${new Date(report.generatedAt).toLocaleString('pt-BR')}`],
+      [],
+      [excelHeader('Indicador'), excelHeader('Valor')],
+      ['Produtos ativos', Number(summary.productCount)],
+      ['Unidades em estoque', Number(summary.totalStock)],
+      ['Produtos abaixo do mínimo', Number(summary.lowStockCount)],
+      ...(canSeeCost ? [['Valor do estoque', excelMoney(summary.inventoryValue)]] : []),
+      [],
+      [excelHeader('Categoria'), excelHeader('Produtos'), excelHeader('Unidades'), ...(canSeeCost ? [excelHeader('Valor em estoque')] : [])],
+      ...categorySummary.map(item => [item.category, Number(item.productCount), Number(item.totalStock), ...(canSeeCost ? [excelMoney(item.inventoryValue)] : [])]),
+      [],
+      [excelHeader('SKU'), excelHeader('Produto'), excelHeader('Categoria'), excelHeader('Estoque'), excelHeader('Mínimo'), ...(canSeeCost ? [excelHeader('Custo')] : []), excelHeader('Preço'), excelHeader('Status')],
+      ...products.map(item => [item.sku, item.name, item.category, Number(item.stock), Number(item.min_stock), ...(canSeeCost ? [excelMoney(item.cost)] : []), excelMoney(item.price), item.active ? 'Ativo' : 'Inativo'])
+    ];
+    sheets.push({ sheet: 'Estoque', data: rows, columns: [{ width: 18 }, { width: 34 }, { width: 22 }, { width: 14 }, { width: 14 }, { width: 16 }, { width: 16 }, { width: 14 }], stickyRowsCount: 2 });
+  }
+  return writeExcelFile(sheets).toBuffer();
+}
+
+function createReportPdf(report, user) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 42, info: { Title: 'Relatório Forjix', Author: user.name } });
+    const chunks = [];
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+    doc.rect(0, 0, doc.page.width, 86).fill('#0b1424');
+    doc.fillColor('#ff6b35').fontSize(10).text('FORJIX ESTOQUE', 42, 28);
+    doc.fillColor('#ffffff').fontSize(20).text('Relatório gerencial', 42, 45);
+    doc.fillColor('#344054').fontSize(9).text(`Período: ${report.from} a ${report.to}  ·  Emitido por: ${user.name}`, 42, 104);
+    doc.y = 132;
+    if (report.sales) writeSalesPdf(doc, report.sales);
+    if (report.inventory) writeInventoryPdf(doc, report.inventory);
+    doc.end();
+  });
+}
+
+function pdfSection(doc, title) {
+  if (doc.y > 690) doc.addPage();
+  doc.moveDown(0.7).fillColor('#ff6b35').fontSize(13).text(title);
+  doc.moveDown(0.35).fillColor('#344054').fontSize(8);
+}
+
+function pdfRows(doc, headers, rows) {
+  doc.fillColor('#0b1424').font('Helvetica-Bold').text(headers.join('  |  '));
+  doc.moveDown(0.25).font('Helvetica');
+  rows.forEach(row => {
+    if (doc.y > 735) doc.addPage();
+    doc.fillColor('#475467').text(row.map(value => String(value ?? '—')).join('  |  '), { width: 510 });
+    doc.moveDown(0.18);
+  });
+}
+
+function reportMoney(value) {
+  return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value || 0));
+}
+
+function writeSalesPdf(doc, sales) {
+  pdfSection(doc, 'Resumo de vendas');
+  pdfRows(doc, ['Faturamento', 'Vendas', 'Ticket médio', 'Descontos'], [[reportMoney(sales.summary.revenue), sales.summary.saleCount, reportMoney(sales.summary.averageTicket), reportMoney(sales.summary.discounts)]]);
+  pdfSection(doc, 'Formas de pagamento');
+  pdfRows(doc, ['Forma', 'Vendas', 'Total'], sales.paymentMethods.map(item => [item.method, item.count, reportMoney(item.total)]));
+  pdfSection(doc, 'Produtos mais vendidos');
+  pdfRows(doc, ['Produto', 'SKU', 'Qtd.', 'Receita'], sales.topProducts.map(item => [item.name, item.sku, item.quantity, reportMoney(item.revenue)]));
+  pdfSection(doc, 'Vendas realizadas');
+  pdfRows(doc, ['Venda', 'Data', 'Pagamento', 'Total'], sales.transactions.map(item => [item.number, item.created_at, item.payment_method, reportMoney(item.total)]));
+}
+
+function writeInventoryPdf(doc, inventory) {
+  pdfSection(doc, 'Resumo do estoque');
+  const summary = [['Produtos ativos', inventory.summary.productCount], ['Unidades', inventory.summary.totalStock], ['Abaixo do mínimo', inventory.summary.lowStockCount]];
+  if (inventory.canSeeCost) summary.push(['Valor do estoque', reportMoney(inventory.summary.inventoryValue)]);
+  pdfRows(doc, ['Indicador', 'Valor'], summary);
+  pdfSection(doc, 'Estoque por categoria');
+  pdfRows(doc, ['Categoria', 'Produtos', 'Unidades', ...(inventory.canSeeCost ? ['Valor'] : [])], inventory.categorySummary.map(item => [item.category, item.productCount, item.totalStock, ...(inventory.canSeeCost ? [reportMoney(item.inventoryValue)] : [])]));
+  pdfSection(doc, 'Produtos e saldos');
+  pdfRows(doc, ['SKU', 'Produto', 'Saldo', 'Mínimo'], inventory.products.map(item => [item.sku, item.name, item.stock, item.min_stock]));
+}
 
 function parseProduct(body, existing = null) {
   return {

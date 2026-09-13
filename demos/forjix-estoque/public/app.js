@@ -322,14 +322,58 @@ async function cancelSale(id) {
 
 async function renderReports(from = new Date(Date.now() - 30 * 86400000).toISOString().slice(0,10), to = new Date().toISOString().slice(0,10)) {
   const report = await api(`/reports/summary?from=${from}&to=${to}`);
-  const salesStats = report.sales ? `${stat('Faturamento',money(report.sales.summary.revenue),'vendas concluídas')}${stat('Vendas',number(report.sales.summary.saleCount),'no período')}${stat('Ticket médio',money(report.sales.summary.averageTicket),'por venda')}` : '';
-  const inventoryStats = report.inventory ? stat('Estoque baixo',number(report.inventory.lowStock.length),'itens para repor',report.inventory.lowStock.length?'warning':'') : '';
-  const salesPanel = report.sales ? `<section class="panel"><div class="panel-header"><h2>Produtos mais vendidos</h2><span>POR QUANTIDADE</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>PRODUTO</th><th>QUANTIDADE</th><th>RECEITA</th></tr></thead><tbody>${report.sales.topProducts.map(item=>`<tr><td><div class="product-cell"><strong>${h(item.name)}</strong><span>${h(item.sku)}</span></div></td><td>${number(item.quantity)}</td><td>${money(item.revenue)}</td></tr>`).join('')||`<tr><td colspan="3">${empty('Sem vendas no período','Altere as datas ou realize uma venda.')}</td></tr>`}</tbody></table></div></section>` : '';
-  const inventoryPanel = report.inventory ? `<section class="panel"><div class="panel-header"><h2>Reposição necessária</h2><span>ESTOQUE MÍNIMO</span></div><div class="panel-body"><div class="alert-list">${report.inventory.lowStock.map(item=>`<div class="alert-item"><div><strong>${h(item.name)}</strong><br><span>${h(item.sku)}</span></div><span class="badge warning">${number(item.stock)} / ${number(item.min_stock)}</span></div>`).join('')||empty('Tudo certo','Nenhum item abaixo do mínimo.')}</div></div></section>` : '';
-  content.innerHTML = `<div class="filters"><label>De<input id="report-from" type="date" value="${h(from)}"></label><label>Até<input id="report-to" type="date" value="${h(to)}"></label><button class="button primary" id="apply-report">Atualizar</button></div>
-    ${salesStats || inventoryStats ? `<div class="stat-grid">${salesStats}${inventoryStats}</div>` : empty('Sem conteúdo liberado', 'O grupo pode abrir Relatórios, mas ainda não recebeu acesso aos relatórios de vendas ou estoque.')}
-    ${salesPanel || inventoryPanel ? `<div class="panel-grid">${salesPanel}${inventoryPanel}</div>` : ''}`;
+  const exportOptions = `${report.sales && report.inventory ? '<option value="complete">Relatório completo</option>' : ''}${report.sales ? '<option value="sales">Somente vendas</option>' : ''}${report.inventory ? '<option value="inventory">Somente estoque</option>' : ''}`;
+  const salesSection = report.sales ? renderSalesReport(report.sales) : '';
+  const inventorySection = report.inventory ? renderInventoryReport(report.inventory) : '';
+  content.innerHTML = `<div class="report-toolbar"><div><strong>Central de relatórios</strong><p>Analise o período e gere documentos prontos para compartilhar.</p></div>${exportOptions ? `<div class="export-actions"><select id="export-type" aria-label="Conteúdo da exportação">${exportOptions}</select><button class="button secondary" data-export="xlsx">↓ Excel</button><button class="button secondary" data-export="pdf">↓ PDF</button></div>` : ''}</div>
+    <div class="filters report-filters"><label>Data inicial<input id="report-from" type="date" value="${h(from)}"></label><label>Data final<input id="report-to" type="date" value="${h(to)}"></label><button class="button primary" id="apply-report">Atualizar análise</button><div class="period-shortcuts"><button data-period="7">7 dias</button><button data-period="30">30 dias</button><button data-period="90">90 dias</button></div></div>
+    ${salesSection || inventorySection ? `${salesSection}${inventorySection}` : empty('Sem conteúdo liberado', 'O grupo pode abrir Relatórios, mas ainda não recebeu acesso aos relatórios de vendas ou estoque.')}`;
   $('#apply-report').addEventListener('click', () => renderReports($('#report-from').value, $('#report-to').value));
+  content.querySelectorAll('[data-period]').forEach(button => button.addEventListener('click', () => {
+    const end = new Date();
+    const start = new Date(Date.now() - (Number(button.dataset.period) - 1) * 86400000);
+    renderReports(start.toISOString().slice(0, 10), end.toISOString().slice(0, 10));
+  }));
+  content.querySelectorAll('[data-export]').forEach(button => button.addEventListener('click', () => downloadReport(button.dataset.export, $('#export-type').value, from, to, button)));
+}
+
+function renderSalesReport(sales) {
+  const max = Math.max(...sales.daily.map(item => item.total), 1);
+  return `<section class="report-section"><div class="report-heading"><div><span>DESEMPENHO COMERCIAL</span><h2>Vendas no período</h2></div><small>${sales.summary.saleCount} venda(s) concluída(s)</small></div>
+    <div class="stat-grid">${stat('Faturamento',money(sales.summary.revenue),'receita líquida')}${stat('Vendas',number(sales.summary.saleCount),'operações concluídas')}${stat('Ticket médio',money(sales.summary.averageTicket),'valor por venda')}${stat('Descontos',money(sales.summary.discounts),'total concedido')}</div>
+    <div class="panel-grid"><section class="panel"><div class="panel-header"><h2>Evolução das vendas</h2><span>FATURAMENTO DIÁRIO</span></div><div class="panel-body"><div class="bar-chart">${sales.daily.map(item=>`<div class="bar-item"><div class="bar" style="height:${Math.max(3,item.total/max*145)}px" title="${money(item.total)}"></div><span>${item.day.slice(5).split('-').reverse().join('/')}</span></div>`).join('')||empty('Sem dados','Não houve venda no período.')}</div></div></section>
+    <section class="panel"><div class="panel-header"><h2>Formas de pagamento</h2><span>PARTICIPAÇÃO</span></div><div class="panel-body"><div class="metric-list">${sales.paymentMethods.map(item=>`<div><span>${h(item.method)}<small>${item.count} venda(s)</small></span><strong>${money(item.total)}</strong></div>`).join('')||empty('Sem pagamentos','Não houve venda no período.')}</div></div></section></div>
+    <div class="panel-grid report-panels"><section class="panel"><div class="panel-header"><h2>Produtos mais vendidos</h2><span>TOP 10</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>PRODUTO</th><th>QUANTIDADE</th><th>RECEITA</th></tr></thead><tbody>${sales.topProducts.map(item=>`<tr><td><div class="product-cell"><strong>${h(item.name)}</strong><span>${h(item.sku)}</span></div></td><td>${number(item.quantity)}</td><td>${money(item.revenue)}</td></tr>`).join('')||`<tr><td colspan="3">${empty('Sem vendas no período','Altere as datas ou realize uma venda.')}</td></tr>`}</tbody></table></div></section>
+    <section class="panel"><div class="panel-header"><h2>Vendas recentes</h2><span>NO PERÍODO</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>VENDA</th><th>DATA</th><th>PAGAMENTO</th><th>TOTAL</th></tr></thead><tbody>${sales.transactions.slice(0,10).map(item=>`<tr><td><strong>${h(item.number)}</strong><br><small>${h(item.user_name)}</small></td><td>${dateTime(item.created_at)}</td><td>${h(item.payment_method)}</td><td><strong>${money(item.total)}</strong></td></tr>`).join('')||`<tr><td colspan="4">${empty('Sem vendas','Nenhuma venda concluída no período.')}</td></tr>`}</tbody></table></div></section></div></section>`;
+}
+
+function renderInventoryReport(inventory) {
+  return `<section class="report-section"><div class="report-heading"><div><span>POSIÇÃO ATUAL</span><h2>Estoque e reposição</h2></div><small>Atualizado agora</small></div>
+    <div class="stat-grid">${stat('Produtos ativos',number(inventory.summary.productCount),'itens no catálogo')}${stat('Unidades em estoque',number(inventory.summary.totalStock),'saldo total')}${stat('Estoque baixo',number(inventory.summary.lowStockCount),'itens para repor',inventory.summary.lowStockCount?'warning':'')}${inventory.summary.inventoryValue != null?stat('Valor do estoque',money(inventory.summary.inventoryValue),'calculado pelo custo'):''}</div>
+    <div class="panel-grid"><section class="panel"><div class="panel-header"><h2>Estoque por categoria</h2><span>VISÃO CONSOLIDADA</span></div><div class="table-wrap"><table class="data-table"><thead><tr><th>CATEGORIA</th><th>PRODUTOS</th><th>UNIDADES</th>${inventory.canSeeCost?'<th>VALOR</th>':''}</tr></thead><tbody>${inventory.categorySummary.map(item=>`<tr><td><strong>${h(item.category)}</strong></td><td>${number(item.productCount)}</td><td>${number(item.totalStock)}</td>${inventory.canSeeCost?`<td>${money(item.inventoryValue)}</td>`:''}</tr>`).join('')}</tbody></table></div></section>
+    <section class="panel"><div class="panel-header"><h2>Reposição necessária</h2><span>ESTOQUE MÍNIMO</span></div><div class="panel-body"><div class="alert-list">${inventory.lowStock.map(item=>`<div class="alert-item"><div><strong>${h(item.name)}</strong><br><span>${h(item.sku)}</span></div><span class="badge warning">${number(item.stock)} / ${number(item.min_stock)}</span></div>`).join('')||empty('Estoque em dia','Nenhum item abaixo do mínimo.')}</div></div></section></div></section>`;
+}
+
+async function downloadReport(format, type, from, to, button) {
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Gerando…';
+  try {
+    const response = await fetch(`/api/reports/export?format=${encodeURIComponent(format)}&type=${encodeURIComponent(type)}&from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, { credentials: 'same-origin' });
+    if (!response.ok) throw new Error((await response.json().catch(()=>({}))).error || 'Não foi possível gerar o arquivo.');
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] || `forjix-relatorio.${format}`;
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(link.href);
+    toast(`Relatório ${format.toUpperCase()} gerado com sucesso.`);
+  } catch (error) { toast(error.message, 'error'); }
+  finally { button.disabled = false; button.textContent = original; }
 }
 
 function openUserModal(user, groups) {

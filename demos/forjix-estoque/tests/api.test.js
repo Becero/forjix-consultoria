@@ -128,6 +128,24 @@ test('fluxo completo: autenticação, estoque, venda, cancelamento e permissões
   assert.ok(permissions.body.some(item => item.code === 'products.view_cost'));
   assert.ok(permissions.body.some(item => item.code === 'groups.edit'));
 
+  const excelExport = await fetch(`${base}/reports/export?format=xlsx&type=complete&from=2000-01-01&to=2999-12-31`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(excelExport.status, 200);
+  assert.match(excelExport.headers.get('content-type'), /spreadsheetml/);
+  const excelBuffer = Buffer.from(await excelExport.arrayBuffer());
+  assert.equal(excelBuffer.subarray(0, 2).toString(), 'PK');
+
+  const pdfExport = await fetch(`${base}/reports/export?format=pdf&type=sales&from=2000-01-01&to=2999-12-31`, {
+    headers: { Authorization: `Bearer ${adminToken}` }
+  });
+  assert.equal(pdfExport.status, 200);
+  assert.match(pdfExport.headers.get('content-type'), /application\/pdf/);
+  const pdfBuffer = Buffer.from(await pdfExport.arrayBuffer());
+  assert.equal(pdfBuffer.subarray(0, 4).toString(), '%PDF');
+
+  assert.equal((await request('/reports/export?format=pdf&type=sales', { token: limitedToken })).response.status, 403);
+
   const salesOperator = await request('/auth/login', {
     method: 'POST', body: JSON.stringify({ email: 'vendas@forjix.local', password: 'Forjix@123' })
   });

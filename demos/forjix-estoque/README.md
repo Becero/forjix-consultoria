@@ -12,7 +12,9 @@ caixa e administração de acessos.
 - frente de caixa com carrinho, desconto e formas de pagamento;
 - baixa automática do estoque durante a venda;
 - cancelamento de venda com devolução dos itens ao estoque;
-- relatórios por período, ticket médio e produtos mais vendidos;
+- central de relatórios com faturamento, ticket médio, descontos, formas de
+  pagamento, produtos mais vendidos, posição de estoque e reposição;
+- exportação de relatórios completos ou por módulo em Excel (`.xlsx`) e PDF;
 - usuários, grupos e permissões granulares para menus, dados e ações;
 - trilha de auditoria das operações relevantes.
 
