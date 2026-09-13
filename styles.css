@@ -528,6 +528,8 @@ a {
 .service-content {
   padding: 30px 32px 32px;
   flex: 1;
+  display: flex;
+  flex-direction: column;
 }
 
 .service-number {
@@ -561,6 +563,32 @@ a {
   content: "•";
   color: var(--accent);
   margin-right: 8px;
+}
+
+.service-demo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  margin-top: 24px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #f1b299;
+  color: #c94d20;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.service-demo-link span {
+  transition: transform .2s ease;
+}
+
+.service-demo-link:hover span {
+  transform: translate(2px, -2px);
+}
+
+.service-demo-link:focus-visible {
+  outline: 3px solid var(--accent-2);
+  outline-offset: 4px;
 }
 
 .section-dark {
