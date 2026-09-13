@@ -46,3 +46,5 @@ Não requer backend.
 O sistema funcional de estoque e frente de caixa está em
 [`demos/forjix-estoque`](demos/forjix-estoque/README.md). Ele possui API, banco de
 dados e instruções próprias de execução.
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https%3A%2F%2Fgithub.com%2FBecero%2Fforjix-consultoria)
