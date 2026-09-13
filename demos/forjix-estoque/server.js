@@ -11,6 +11,8 @@ const db = createDatabase(process.env.DB_PATH);
 const app = express();
 const port = Number(process.env.PORT || 3333);
 const authenticate = createAuthMiddleware(db);
+const demoMode = process.env.DEMO_MODE === 'true';
+const protectedDemoUsers = new Set(['admin@forjix.local', 'vendas@forjix.local', 'estoque@forjix.local']);
 
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '500kb' }));
@@ -320,6 +322,9 @@ app.post('/api/users', authenticate, permit('users.manage'), (req, res) => {
 app.put('/api/users/:id', authenticate, permit('users.manage'), (req, res) => {
   const existing = db.prepare('SELECT * FROM users WHERE id=?').get(req.params.id);
   if (!existing) return res.status(404).json({ error: 'Usuário não encontrado.' });
+  if (demoMode && protectedDemoUsers.has(existing.email)) {
+    return res.status(403).json({ error: 'Os usuários padrão são protegidos na demonstração pública.' });
+  }
   const name = cleanText(req.body.name, 'Nome');
   const email = cleanText(req.body.email, 'E-mail').toLowerCase();
   const groupId = numeric(req.body.groupId, 'Grupo', { allowZero: false });
@@ -368,6 +373,9 @@ app.post('/api/groups', authenticate, permit('groups.manage'), (req, res) => {
 app.put('/api/groups/:id', authenticate, permit('groups.manage'), (req, res) => {
   const group = db.prepare('SELECT * FROM access_groups WHERE id=?').get(req.params.id);
   if (!group) return res.status(404).json({ error: 'Grupo não encontrado.' });
+  if (demoMode && group.is_system) {
+    return res.status(403).json({ error: 'Os grupos padrão são protegidos na demonstração pública.' });
+  }
   const name = cleanText(req.body.name, 'Nome do grupo');
   const description = optionalText(req.body.description, 300);
   const permissions = Array.isArray(req.body.permissions) ? req.body.permissions : [];

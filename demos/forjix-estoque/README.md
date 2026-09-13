@@ -67,6 +67,18 @@ O caixa atual é **gerencial e não fiscal**. NFC-e, SAT, TEF, impressão fiscal
 cadastro tributário e integrações contábeis devem ser tratados como módulos
 específicos da implantação.
 
+## Demo online no Render
+
+O arquivo `render.yaml`, na raiz do repositório, cria automaticamente um serviço
+Node gratuito com `demos/forjix-estoque` como diretório da aplicação. O segredo de
+autenticação é gerado pelo Render e `DEMO_MODE=true` protege os usuários e grupos
+padrão contra alterações.
+
+No plano gratuito, o banco SQLite é demonstrativo: os dados adicionados podem ser
+reiniciados quando o serviço dorme, reinicia ou recebe uma nova implantação. Para
+persistência real, use um serviço pago com disco persistente ou migre para
+PostgreSQL.
+
 ## Testes
 
 ```bash

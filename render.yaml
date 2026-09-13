@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: forjix-estoque-demo
+    runtime: node
+    plan: free
+    rootDir: demos/forjix-estoque
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 process.env.DB_PATH = ':memory:';
 process.env.JWT_SECRET = 'test-secret-with-enough-entropy-for-demo';
+process.env.DEMO_MODE = 'false';
 
 const { app, db } = await import('../server.js');
 const server = app.listen(0);
